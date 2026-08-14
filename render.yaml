@@ -1,0 +1,40 @@
+# Render Blueprint — https://render.com
+#
+# With this file in the repo, Render configures the whole service itself.
+# You only paste in the two API keys.
+#
+# Note: Vite and its React plugin sit in "dependencies" rather than
+# "devDependencies" on purpose. Hosts commonly set NODE_ENV=production,
+# which makes npm skip devDependencies — and then the build has no
+# build tool. Keeping them in dependencies makes the deploy work
+# anywhere without special flags.
+
+services:
+  - type: web
+    name: dungeon-masters-table
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+
+      # Paste these in the Render dashboard — never commit real keys.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+      # Leave blank for a site open to anyone with the link.
+      # Type anything here later to turn on a password screen.
+      - key: APP_PASSWORD
+        sync: false
+
+      # Spend guardrails. Lower them if you get nervous.
+      - key: RATE_LIMIT_PER_MIN
+        value: "25"
+      - key: DAILY_REQUEST_LIMIT
+        value: "1500"
