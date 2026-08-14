@@ -98,7 +98,6 @@ export default function App() {
           </div>
 
           <div className="banner-right">
-            <ServiceLamp health={health} />
             <button className="btn sm ghost" onClick={() => setSettingsOpen(true)}>
               ⚙ Campaign
             </button>
@@ -209,39 +208,33 @@ function LockScreen({ onUnlocked }) {
    Backend status lamp
    ============================================================ */
 
+/* Deliberately not in the banner — a DM shouldn't be looking at plumbing
+   while they run a game. It lives in settings, where you go when something
+   is actually wrong. */
 function ServiceLamp({ health }) {
-  const dot = (on, label) => (
-    <span
-      title={label}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        fontFamily: 'var(--font-head)',
-        fontSize: 10,
-        letterSpacing: '.12em',
-        textTransform: 'uppercase',
-        opacity: 0.85,
-      }}
-    >
+  const row = (on, label, whenOff) => (
+    <div className="row tight" style={{ fontSize: 14 }}>
       <span
         style={{
-          width: 7,
-          height: 7,
+          width: 8,
+          height: 8,
           borderRadius: '50%',
+          flex: '0 0 auto',
           background: on ? '#7aa04f' : '#a13a1e',
           boxShadow: `0 0 7px ${on ? '#7aa04f' : '#a13a1e'}`,
         }}
       />
-      {label}
-    </span>
+      <strong style={{ minWidth: 120 }}>{label}</strong>
+      <span className="muted tiny">{on ? 'connected' : whenOff}</span>
+    </div>
   );
 
   if (!health) return null;
   return (
-    <div className="row tight" style={{ gap: 12 }}>
-      {dot(health.claude, 'Claude')}
-      {dot(health.whisper, 'Whisper')}
+    <div className="stack" style={{ gap: 7 }}>
+      {row(health.claude, 'Writing & reading', 'ANTHROPIC_API_KEY not set')}
+      {row(health.whisper, 'Transcription', 'OPENAI_API_KEY not set')}
+      {row(health.sounds, 'Sound library', 'FREESOUND_API_KEY not set — using synthesis')}
     </div>
   );
 }
@@ -339,11 +332,11 @@ function CampaignSettings({ open, onClose, health }) {
       <Rule />
 
       <div className="grid two">
-        <Field label={`Transcribe every ${settings.chunkSeconds}s`}>
+        <Field label={`Transcript updates every ${settings.chunkSeconds}s`}>
           <input
             type="range"
-            min="20"
-            max="120"
+            min="10"
+            max="90"
             step="5"
             value={settings.chunkSeconds}
             onChange={(e) => actions.updateSettings({ chunkSeconds: Number(e.target.value) })}
@@ -412,16 +405,17 @@ function CampaignSettings({ open, onClose, health }) {
         </button>
       </div>
 
-      {health && (!health.claude || !health.whisper) && (
-        <>
-          <Rule />
-          <p className="tiny" style={{ color: 'var(--oxblood)' }}>
-            <strong>Backend keys missing.</strong>{' '}
-            {!health.claude && 'ANTHROPIC_API_KEY is not set — generators, notes, and sheet parsing are offline. '}
-            {!health.whisper && 'OPENAI_API_KEY is not set — recording transcription is offline. '}
-            Add them to <span className="mono">server/.env</span> and restart the server.
-          </p>
-        </>
+      <Rule />
+      <div className="panel-title" style={{ fontSize: 12 }}>
+        <span>Services</span>
+        <span className="flourish" />
+      </div>
+      <ServiceLamp health={health} />
+      {health && (!health.claude || !health.whisper || !health.sounds) && (
+        <p className="tiny muted" style={{ marginTop: 10, marginBottom: 0 }}>
+          Keys are set on the server, not here — in Render under <strong>Environment</strong>, or in{' '}
+          <span className="mono">server/.env</span> if you're running locally.
+        </p>
       )}
     </Modal>
   );

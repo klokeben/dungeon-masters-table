@@ -256,6 +256,7 @@ function Running({ goToTab }) {
       toast('Recording. The table is being transcribed.', 'success');
     } catch (e) {
       setMicError(e.message);
+      actions.patchLive({ micDeclined: true }); // don't nag on every re-render
       toast(e.message, 'error');
     }
   };
@@ -273,6 +274,13 @@ function Running({ goToTab }) {
 
   // Never leave the mic open if this unmounts.
   useEffect(() => () => { recorderRef.current?.stop(); }, []);
+
+  // Start listening the moment the session opens. Waiting for a second button
+  // press means the first five minutes of every session go unrecorded.
+  useEffect(() => {
+    if (!live.recording && !recorderRef.current && !live.micDeclined) startRecording();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ---------- ending ---------- */
   const endSession = async ({ synthesize }) => {
@@ -381,6 +389,7 @@ function Running({ goToTab }) {
         {micError && (
           <p className="tiny" style={{ color: '#e59a9a', marginBottom: 0, marginTop: 10 }}>
             Microphone: {micError} — the session still runs, you'll just be taking notes by hand.
+            Fix the permission and press Start Recording to pick it up mid-session.
           </p>
         )}
       </Panel>

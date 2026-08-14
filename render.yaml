@@ -33,6 +33,13 @@ services:
       - key: APP_PASSWORD
         sync: false
 
+      # NOTE: optional keys are deliberately NOT listed here. Render treats
+      # every variable in this file as a required prompt and refuses a blank
+      # answer. Add optional ones in the dashboard instead:
+      #   FREESOUND_API_KEY — free, no card; swaps the soundboard from
+      #                       synthesized tones to real recordings
+      #   TRANSCRIBE_MODEL  — defaults to gpt-transcribe
+
       # Spend guardrails. Lower them if you get nervous.
       - key: RATE_LIMIT_PER_MIN
         value: "25"

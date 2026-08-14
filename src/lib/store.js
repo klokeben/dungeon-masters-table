@@ -22,7 +22,7 @@ const DEFAULT_STATE = {
   sessions: [],
   generated: [],
   settings: {
-    chunkSeconds: 45,
+    chunkSeconds: 20,
     autoScanHp: true,
     autoApplyHigh: false,
     masterVolume: 0.7,

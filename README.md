@@ -75,6 +75,13 @@ Then add the environment variables under the **Environment** section: `ANTHROPIC
 The site needs to talk to two AI services, and each wants a key — a long string of characters that
 says "bill this usage to me."
 
+**Optional third key — real audio.** [freesound.org](https://freesound.org) is free with no credit
+card. Sign up, then apply for an API key at
+[freesound.org/apiv2/apply](https://freesound.org/apiv2/apply) (approval is instant). Add it in
+Render → **Environment** → **Add Environment Variable** → `FREESOUND_API_KEY`. The soundboard
+switches from synthesized tones to real recordings the moment it redeploys. Skip it and everything
+still works, just synthesized.
+
 **Claude** (writes your session notes, runs the generators, reads character sheets):
 go to [console.anthropic.com](https://console.anthropic.com/settings/keys), sign up, add a payment
 method, then **Create Key**. Copy it immediately; it's only shown once.
@@ -122,8 +129,16 @@ redeploys, it does *not* follow you to another computer or your phone, and clear
 data wipes it. Use **⚙ Campaign → Export everything** for backups — it's one JSON file you can
 import anywhere.
 
-**Updating it later.** Edit a file on GitHub (or upload a new one) and Render rebuilds and
-redeploys automatically within a couple of minutes. Nothing else to do.
+**Updating it later.** Two minutes, no Terminal:
+
+1. Open your repository on GitHub
+2. Click **Add file** → **Upload files**
+3. Drag in the new or changed files — GitHub replaces anything with a matching name and leaves the
+   rest alone. When in doubt, drag the whole folder contents again; that's always safe.
+4. Scroll down, **Commit changes**
+
+Render notices within seconds and rebuilds itself. Watch the deploy log if you like; you don't need
+to touch any settings.
 
 ---
 
@@ -132,10 +147,12 @@ redeploys automatically within a couple of minutes. Nothing else to do.
 ### 🔴 Live Session
 The screen you actually run the game from.
 
-- **Recording & transcription.** The recorder runs a relay: it records a complete, self-contained
-  audio file every N seconds (45 by default, adjustable), ships it to Whisper, and immediately
-  starts the next one. Your character names and campaign glossary are passed along as a vocabulary
-  hint so "Kaelthorne" doesn't come back as "kale thorn."
+- **Recording & transcription.** The microphone starts the moment you open a session — no second
+  button to forget. The recorder runs a relay: it records a complete, self-contained audio file
+  every N seconds (20 by default, adjustable from 10), ships it off for transcription, and
+  immediately starts the next one, so text arrives more or less continuously. Your character names and campaign glossary ride along in the
+  transcription model's `keywords` parameter, which exists precisely so that "Kaelthorne" doesn't
+  come back as "kale thorn."
 - **Hit points that keep themselves.** As the transcript comes in, Claude watches it for damage,
   healing, temp HP, going down, and rests. Anything it finds appears as a suggestion card with a
   confidence rating — you press ✓ or ✕. Turn on *"apply high-confidence changes without asking"* in
@@ -182,13 +199,19 @@ Results render as proper stat blocks and boxed read-aloud text. Save anything wo
 Vault, search it later, copy it or export it as Markdown.
 
 ### 🎵 Soundboard
-Fourteen ambiences and twenty-eight sound effects, all synthesized live in the browser with the
-Web Audio API — no files to download, nothing to license, no loading spinner. Ambiences layer
-drones, filtered noise beds, and scheduled motifs (the tavern has a lute working through D dorian;
-the boss theme is a tritone under a heartbeat). Picking a new ambience crossfades. Sound keeps
-playing while you work in other tabs.
+Twenty-four ambiences and forty-nine effects. Every pad resolves through three sources, in order:
 
-Keys `1`–`9` fire the first nine effects. `Esc` kills the ambience.
+1. **A file you uploaded** — click the `⋯` on any pad and drop in your own MP3. Stored in your
+   browser, overrides everything else. This is the escape hatch when you know exactly what you want.
+2. **A real recording** — if a Freesound key is configured, the server searches for the pad's sound,
+   filtered to Creative Commons Zero (public domain: no attribution, nothing to trip over). The `⋯`
+   menu shows the top candidates with previews so you can swap any take you don't like. Your choice
+   is remembered.
+3. **Synthesis** — the built-in Web Audio patches, used automatically whenever the first two aren't
+   available. Never fails, never loads, always makes *something*.
+
+Picking a new ambience crossfades over about a second. Sound keeps playing while you work in other
+tabs. Keys `1`–`9` fire the first nine effects; `Esc` kills the ambience.
 
 ---
 
@@ -237,6 +260,7 @@ import graph, and package completeness.
 ├── server/
 │   ├── index.js            API + serves the built app + rate limits + optional password
 │   ├── prompts.js          every prompt and output schema lives here
+│   ├── soundpacks.js       the pad catalog and what each one searches for
 │   └── .env.example        local development only; on Render these are dashboard settings
 └── src/
     ├── App.jsx             shell, tabs, campaign settings, lock screen
@@ -261,9 +285,11 @@ Want a different generator? Add an entry to `GENERATORS` in `server/prompts.js` 
 prompt builder, then add it to `KINDS` and `FIELDS` in `src/tabs/Improv.jsx`. The renderer is
 generic — it will lay out whatever shape you describe.
 
-Want a different ambience? Add an entry to `AMBIENCES` in `src/lib/audio.js`. You get `drone`,
-`noiseLayer`, `pluck`, `tone`, `drum`, and `burst` as primitives, plus an `every(ms, fn)` scheduler
-for recurring events.
+Want a different ambience or effect? Add an entry to `AMBIENCE_PACK` or `SFX_PACK` in
+`server/soundpacks.js` — a label, a glyph, a Freesound search query, and the name of a synthesized
+patch to fall back on. It appears on the board immediately. To write a new synthesized patch, add it
+to `AMBIENCES` or `SFX` in `src/lib/audio.js`, where you get `drone`, `noiseLayer`, `pluck`, `tone`,
+`drum`, and `burst` as primitives plus an `every(ms, fn)` scheduler.
 
 > One deliberate oddity: `vite` and `@vitejs/plugin-react` sit in `dependencies` rather than
 > `devDependencies`. Hosting platforms commonly set `NODE_ENV=production`, which makes npm skip
@@ -276,8 +302,9 @@ for recurring events.
 
 - Chrome, Edge, and Firefox all record reliably. Safari's `MediaRecorder` support is newer and less
   predictable — test before you rely on it for a session.
-- Whisper is good but not perfect with six people talking over each other. The campaign glossary
-  helps a lot. The write-up is instructed to flag what it couldn't make out rather than invent it.
+- Transcription defaults to OpenAI's `gpt-transcribe`, which is considerably better than the older
+  `whisper-1` on several people talking over each other. Set `TRANSCRIBE_MODEL` if you want the old
+  one back. Either way the campaign glossary helps a lot. The write-up is instructed to flag what it couldn't make out rather than invent it.
 - HP detection is deliberately conservative: it only reports a change when both the target and the
   number are clear, and it never touches monster HP.
 - The rate limits live in the server's memory, so they reset whenever the site sleeps or

@@ -24,13 +24,24 @@ import {
   SHEET_SYSTEM,
   COMBAT_SYSTEM,
 } from './prompts.js';
+import { ALL_PADS, PAD_BY_KEY, DURATION_FILTER } from './soundpacks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', 'dist');
 
 const PORT = process.env.PORT || 8787;
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
-const WHISPER_MODEL = process.env.WHISPER_MODEL || 'whisper-1';
+
+/* gpt-transcribe replaced whisper-1 as OpenAI's transcription model — it is
+   markedly more accurate on noisy, multi-speaker audio, which is exactly what
+   a table of six people shouting over each other is. whisper-1 still works if
+   you set TRANSCRIBE_MODEL back to it. */
+const TRANSCRIBE_MODEL = process.env.TRANSCRIBE_MODEL || process.env.WHISPER_MODEL || 'gpt-transcribe';
+
+/* Optional third key: real recorded audio for the soundboard instead of
+   synthesized tones. Free, no credit card. Without it the board falls back
+   to synthesis and still works. */
+const FREESOUND_KEY = (process.env.FREESOUND_API_KEY || '').trim();
 
 /* Leave APP_PASSWORD empty and the site is open to anyone with the link.
    Set it to any string and a lock screen appears — no redeploy of code needed. */
@@ -113,21 +124,74 @@ function extractJson(text) {
 
 /** One-shot JSON call to Claude, with an assistant prefill to keep it honest. */
 async function askClaudeJson({ system, user, content, maxTokens = 6000, temperature = 1 }) {
-  const msg = await anthropic().messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: maxTokens,
-    temperature,
-    system,
-    messages: [
-      { role: 'user', content: content || user },
-      { role: 'assistant', content: '{' },
-    ],
-  });
+  let msg;
+  try {
+    msg = await anthropic().messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: maxTokens,
+      temperature,
+      system,
+      messages: [
+        { role: 'user', content: content || user },
+        { role: 'assistant', content: '{' },
+      ],
+    });
+  } catch (e) {
+    throw humanize(e, 'anthropic');
+  }
   const text = '{' + msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
   return { data: extractJson(text), usage: msg.usage };
 }
 
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/**
+ * Upstream APIs return accurate but unhelpful errors. A DM mid-session needs to
+ * know what to actually do, so translate the common ones into instructions.
+ */
+function humanize(err, service) {
+  const status = err?.status || err?.statusCode;
+  const raw = String(err?.message || '');
+  const code = err?.error?.error?.code || err?.error?.code || '';
+  const where = service === 'openai' ? 'OpenAI' : 'Anthropic';
+  const billing =
+    service === 'openai'
+      ? 'https://platform.openai.com/settings/organization/billing'
+      : 'https://console.anthropic.com/settings/billing';
+
+  if (status === 401 || /invalid[_ ]api[_ ]key|incorrect api key/i.test(raw)) {
+    const e = new Error(
+      `The ${where} key on the server isn't being accepted. Check it was pasted whole, with no spaces at either end, then redeploy.`
+    );
+    e.status = 401;
+    return e;
+  }
+  if (code === 'insufficient_quota' || /quota|billing hard limit|credit balance/i.test(raw)) {
+    const e = new Error(
+      `Your ${where} account has no credit available. A new account starts at zero even with a card on file — add credit at ${billing}, then try again.`
+    );
+    e.status = 402;
+    return e;
+  }
+  if (status === 429) {
+    const e = new Error(`${where} is rate limiting us. Wait a few seconds and try again.`);
+    e.status = 429;
+    return e;
+  }
+  if (status === 404 || /model.*(not found|does not exist)/i.test(raw)) {
+    const e = new Error(
+      `${where} doesn't recognise the model this server asked for. Check the ${service === 'openai' ? 'TRANSCRIBE_MODEL' : 'CLAUDE_MODEL'} setting.`
+    );
+    e.status = 400;
+    return e;
+  }
+  if (status >= 500) {
+    const e = new Error(`${where} is having problems on their end. This usually clears in a minute.`);
+    e.status = 502;
+    return e;
+  }
+  return err;
+}
 
 /* ============================================================
    public endpoints (no lock, no rate limit)
@@ -139,7 +203,8 @@ app.get('/api/health', (req, res) => {
     locked: Boolean(APP_PASSWORD),
     claude: Boolean(process.env.ANTHROPIC_API_KEY),
     whisper: Boolean(process.env.OPENAI_API_KEY),
-    models: { claude: CLAUDE_MODEL, whisper: WHISPER_MODEL },
+    sounds: Boolean(FREESOUND_KEY),
+    models: { claude: CLAUDE_MODEL, transcribe: TRANSCRIBE_MODEL },
     generators: Object.entries(GENERATORS).map(([k, v]) => ({ kind: k, label: v.label })),
     budget: { usedToday: usage.count, dailyLimit: DAILY_LIMIT },
   });
@@ -164,9 +229,17 @@ app.use('/api', (req, res, next) => {
   res.status(401).json({ error: 'locked', locked: true });
 });
 
+/* The sound routes are served from cache and cost nothing, so they don't
+   spend the AI budget — browsing the soundboard shouldn't throttle a session.
+   Matched on originalUrl, not req.path: inside an app.use('/api', ...) mount
+   Express rewrites req.path to be relative, so it is not a stable thing to
+   pattern-match against. */
+const isFreeRoute = (req) => /^\/api\/sounds\//.test(req.originalUrl || req.url || '');
+
 /** Per-IP burst limit — a sliding one-minute window, kept in memory. */
 const hits = new Map();
 app.use('/api', (req, res, next) => {
+  if (isFreeRoute(req)) return next();
   const now = Date.now();
   const ip = req.ip || 'unknown';
   const window = hits.get(ip)?.filter((t) => now - t < 60_000) || [];
@@ -189,6 +262,7 @@ app.use('/api', (req, res, next) => {
 /** Daily ceiling across everyone — the real backstop on a public URL. */
 const usage = { day: new Date().toISOString().slice(0, 10), count: 0 };
 app.use('/api', (req, res, next) => {
+  if (isFreeRoute(req)) return next();
   const today = new Date().toISOString().slice(0, 10);
   if (usage.day !== today) {
     usage.day = today;
@@ -232,17 +306,41 @@ app.post(
       type: mime || 'audio/webm',
     });
 
-    const result = await openai().audio.transcriptions.create({
-      file,
-      model: WHISPER_MODEL,
-      // Nudge Whisper toward fantasy vocabulary and the actual names at this table.
-      prompt: (req.body.vocabulary || '').slice(0, 800) ||
-        'A Dungeons & Dragons session. Expect character names, spell names, and dice terminology.',
-      language: req.body.language || 'en',
-      response_format: 'json',
-    });
+    // Character and place names are the whole problem with transcribing D&D.
+    // gpt-transcribe takes them as a first-class `keywords` list, which works
+    // far better than burying them in the prompt the way whisper-1 required.
+    const names = String(req.body.vocabulary || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 100);
 
-    res.json({ text: (result.text || '').trim() });
+    const context =
+      'A tabletop Dungeons & Dragons session. Several people talking, often over each other. ' +
+      'Expect invented character and place names, spell names, and dice terminology ' +
+      '("nat twenty", "d8", "saving throw", "initiative").';
+
+    const legacy = /^whisper/.test(TRANSCRIBE_MODEL);
+    const params = { file, model: TRANSCRIBE_MODEL, prompt: context };
+
+    if (legacy) {
+      // whisper-1 has no keywords parameter — names have to ride in the prompt.
+      params.prompt = `${context} Names used at this table: ${names.join(', ')}`.slice(0, 900);
+      params.language = req.body.language || 'en';
+      params.response_format = 'json';
+    } else {
+      if (names.length) params.keywords = names;
+      params.languages = [req.body.language || 'en'];
+    }
+
+    let result;
+    try {
+      result = await openai().audio.transcriptions.create(params);
+    } catch (e) {
+      throw humanize(e, 'openai');
+    }
+
+    res.json({ text: (result.text || '').trim(), model: TRANSCRIBE_MODEL });
   })
 );
 
@@ -377,8 +475,80 @@ ambiguous, say so and give the fastest fair table ruling. Never stall — the pl
       messages: [
         { role: 'user', content: context ? `Table context: ${context}\n\nQuestion: ${question}` : question },
       ],
-    });
+    }).catch((e) => { throw humanize(e, 'anthropic'); });
     res.json({ answer: msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('') });
+  })
+);
+
+/* ---------- 7. the sound library ---------- */
+
+/* Freesound results barely change, so cache hard. This also keeps us well
+   inside Freesound's 60/minute allowance no matter how many people are on. */
+const soundCache = new Map();
+const SOUND_TTL = 12 * 60 * 60 * 1000;
+
+async function findSounds(pad) {
+  const hit = soundCache.get(pad.key);
+  if (hit && Date.now() - hit.at < SOUND_TTL) return hit.results;
+
+  const url = new URL('https://freesound.org/apiv2/search/text/');
+  url.searchParams.set('query', pad.query);
+  // Creative Commons 0 only: no attribution obligations, nothing to trip over
+  // if this ever gets shared or streamed.
+  url.searchParams.set(
+    'filter',
+    `license:"Creative Commons 0" duration:${DURATION_FILTER[pad.kind]}`
+  );
+  url.searchParams.set('sort', 'rating_desc');
+  url.searchParams.set('page_size', '8');
+  url.searchParams.set('fields', 'id,name,previews,duration,username,url,avg_rating');
+  url.searchParams.set('token', FREESOUND_KEY);
+
+  const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      const e = new Error('The Freesound key is not being accepted. Check it in your server settings.');
+      e.status = 401;
+      throw e;
+    }
+    const e = new Error(`Freesound returned ${res.status}.`);
+    e.status = 502;
+    throw e;
+  }
+
+  const body = await res.json();
+  const results = (body.results || [])
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      url: s.previews?.['preview-hq-mp3'] || s.previews?.['preview-lq-mp3'],
+      duration: Math.round(s.duration || 0),
+      author: s.username,
+      page: s.url,
+      rating: Math.round((s.avg_rating || 0) * 10) / 10,
+    }))
+    .filter((s) => s.url);
+
+  soundCache.set(pad.key, { at: Date.now(), results });
+  return results;
+}
+
+/** The catalog is static — no network, no key needed. */
+app.get('/api/sounds/catalog', (req, res) => {
+  res.json({
+    live: Boolean(FREESOUND_KEY),
+    pads: ALL_PADS.map(({ query, ...rest }) => rest), // the search terms are ours, not the client's business
+  });
+});
+
+/** Candidates for one pad, so the DM can swap a sound they don't like. */
+app.get(
+  '/api/sounds/pad/:key',
+  asyncRoute(async (req, res) => {
+    const pad = PAD_BY_KEY[req.params.key];
+    if (!pad) return res.status(404).json({ error: `No sound pad called "${req.params.key}".` });
+    if (!FREESOUND_KEY) return res.json({ live: false, results: [] });
+    res.json({ live: true, results: await findSounds(pad) });
   })
 );
 
@@ -439,7 +609,8 @@ app.listen(PORT, () => {
   const tick = (b) => (b ? '✔' : '✘');
   console.log(`\n  ⚔  The Dungeon Master's Table — listening on :${PORT}`);
   console.log(`     ${tick(process.env.ANTHROPIC_API_KEY)} Claude   (${CLAUDE_MODEL})`);
-  console.log(`     ${tick(process.env.OPENAI_API_KEY)} Whisper  (${WHISPER_MODEL})`);
+  console.log(`     ${tick(process.env.OPENAI_API_KEY)} Speech   (${TRANSCRIBE_MODEL})`);
+  console.log(`     ${tick(FREESOUND_KEY)} Sounds   (${FREESOUND_KEY ? 'real recordings via Freesound' : 'synthesized fallback'})`);
   console.log(`     ${tick(built)} Frontend ${built ? 'served from /dist' : 'not built — run npm run build'}`);
   console.log(`     ${APP_PASSWORD ? '🔒 password required' : '🔓 open to anyone with the link'}`);
   console.log(`     limits: ${RATE_PER_MIN}/min per visitor, ${DAILY_LIMIT}/day total\n`);
